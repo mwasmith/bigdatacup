@@ -1,4 +1,9 @@
 # bigdatacup
 Measurement of Passing in the Ontario Hockey League
 
-To run the script, open the RMD file and run the code chunks that pull and clean the data. Once the data is cleaned, open pass_bart and run the model. It will save a few files that you can call into the RMD file later on.
+- Open the RMD file
+- Run the library and code chunks that pull and clean the data (i.e., do not load anything yet)
+- Open pass_bart. Inspiration from Asmae Toumi's Big Data Bowl submission. 
+- Run the script. It will save a number of items that you can call into the RMD afterwards.
+- Knit the RMD file. 
+
