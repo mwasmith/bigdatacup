@@ -1,0 +1,432 @@
+
+---
+title: '**Measurement of Passing in the Ontario Hockey League**'
+output:
+  word_document: default
+---
+
+### Introduction  
+
+Junior and professional hockey are faced with unique challenges brought on by the COVID-19 pandemic. These challenges provide decision makers with the opportunity to innovate and experiment with new tools and methodologies to answer hockey questions.
+
+Inspired by [Toumi et al. (2021)](https://www.kaggle.com/asmaetoumi/weighted-assessment-of-defender-effectiveness#Catch-Probability-Over-Expectation-(dCPOE)), **completion probability over expectation (CPOE)** uses Bayesian Additive Regression Trees ([Chipman et al. (2010)](https://projecteuclid.org/journals/annals-of-applied-statistics/volume-4/issue-1/BART--Bayesian-additive-regression/10.1214/09-AOAS285.full)) to estimate the probability that a *direct* (or *tape-to-tape*) pass will be completed in the context of a number of inputs.   
+
+We apply CPOE to explore the following questions:  
+
+  1. Who are the best tape-to-tape passers in the OHL?
+  2. Who are the best 2021 draft eligible tape-to-tape passers?
+  
+### Data  
+
+#### Scouting data  
+
+
+[Scouting data](https://raw.githubusercontent.com/bigdatacup/Big-Data-Cup-2021/main/hackathon_scouting.csv) is read and cleaned to account for differences in player names between the scouting dataset and OHL player demographic dataset. We create a few new variables that help us identify player sequences, whether a team has a man advantage, whether a team has a lead, and if the pass was successfully completed.  
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+library(rmarkdown)
+library(knitr)
+library(tidyverse)
+library(data.table)
+library(tibble)
+library(scales)
+library(lubridate)
+
+library(rvest)
+library(httr)
+library(purrr)
+library(reshape2)
+
+library(plotly)
+library(ggplot2)
+library(ggthemes)
+library(png)
+library(grid)
+library(viridis)
+library(wesanderson)
+library(glue)
+
+library(hrbrthemes)
+library(patchwork)
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+
+# If running for the first time, skip this code chunk. You will need to get, clean, and join the scouting and OHL data first. Once that is complete, use pass_bart.R to run the model. It will save trained_pass.RData to your wd for you to load in the future.
+
+load("data/BART_pass/trained_pass.RData")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+
+# Get big data cup data
+  df_ohl <- read.csv("https://raw.githubusercontent.com/bigdatacup/Big-Data-Cup-2021/main/hackathon_scouting.csv") %>% 
+    group_by(game_date, Period) %>%
+    mutate(sequence = rleid(Team)) %>%   
+    ungroup() %>% 
+    group_by(game_date, Period, Team) %>% 
+    mutate(n = rleid(sequence)) %>% 
+    ungroup() %>% 
+    mutate(distance = sqrt(((X.Coordinate-X.Coordinate.2)^2)+((Y.Coordinate-Y.Coordinate.2)^2)),
+           distance_from_net = sqrt(((189-X.Coordinate.2)^2)+((42-Y.Coordinate.2)^2))) %>% 
+    group_by(game_date, Period, Team, n) %>% 
+    mutate(p = 1:n()) %>% 
+    ungroup() %>% 
+    mutate(passer_zone = 
+             case_when(
+               X.Coordinate <= 75 ~ "defensive",
+               X.Coordinate >75 & X.Coordinate < 125 ~ "neutral",
+               X.Coordinate >=125 ~ "offensive"),
+           passer_side = 
+             case_when(
+               Y.Coordinate <= 20.5 ~ "left",
+               Y.Coordinate >20.5 & Y.Coordinate < 64.5 ~ "center",
+               Y.Coordinate >=64.5 ~ "right"),
+           receiver_zone = 
+             case_when(
+               X.Coordinate.2 <= 75 ~ "defensive",
+               X.Coordinate.2 >75 & X.Coordinate.2 < 125 ~ "neutral",
+               X.Coordinate.2 >=125 ~ "offensive"),
+           receiver_side = 
+             case_when(
+               Y.Coordinate.2 <= 20.5 ~ "left",
+               Y.Coordinate.2 >20.5 & Y.Coordinate.2 < 64.5 ~ "center",
+               Y.Coordinate.2 >=64.5 ~ "right"),
+           transition_zone = paste0(passer_zone,"-to-",receiver_zone),
+           transition_side = paste0(passer_side,"-to-",receiver_side),
+           pass_success_binary = 
+             case_when(
+               Event == "Play" ~ 1,
+               Event == "Incomplete Play" ~ 0
+               ),
+           Lead =
+             case_when(
+               Team == Home.Team ~ as.numeric(Home.Team.Goals-Away.Team.Goals),
+               Team == Away.Team ~ as.numeric(Away.Team.Goals-Home.Team.Goals),
+             ),
+           Man_Adv =
+             case_when(
+               Team == Home.Team ~ (Home.Team.Skaters - Away.Team.Skaters),
+               Team == Away.Team ~ (Away.Team.Skaters - Home.Team.Skaters)
+             ),
+           Player = gsub('[.]','',Player),
+           Player.2 = gsub('[.]','',Player.2),
+           Player = gsub('Ole Holm','Ole Bjorgvik-Holm',Player),
+           Player.2 = gsub('Ole Holm','Ole Bjorgvik-Holm',Player.2),
+           Player = gsub('Luca Del Bel Belluz','Luca DelBelBelluz', Player),
+           Player.2 = gsub('Luca Del Bel Belluz','Luca DelBelBelluz', Player.2),
+           Player = gsub('Yevgeni Oksentyuk','Evgeniy Oksentyuk', Player),
+           Player.2 = gsub('Yevgeni Oksentyuk','Evgeniy Oksentyuk', Player.2),
+           Player = gsub('Theoren Hill','Theo Hill', Player),
+           Player.2 = gsub('Theoren Hill','Theo Hill', Player.2),
+           Player = gsub('Johnny Gruden','Jonathan Gruden', Player),
+           Player.2 = gsub('Johnny Gruden','Jonathan Gruden', Player.2),
+           Player = gsub('Matthew MacDougall','Mathew MacDougall', Player),
+           Player.2 = gsub('Matthew MacDougall','Mathew MacDougall', Player.2)
+    ) 
+  
+```
+
+#### OHL Demographics  
+  
+Understanding performance for those eligible for the 2021 NHL draft will require additional information. We created a loop to get [OHL demographics data](https://lscluster.hockeytech.com/feed/?feed=modulekit&view=player&key=2976319eb44abe94&fmt=json&client_code=ohl&lang=en&player_id=8300&category=profile), which will support model development.  
+  
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+
+#For player ID 6000 to 8340, get OHL demographic data.
+players <- NULL
+i = NULL
+for (i in 6000:8340) {
+  url <- paste("https://lscluster.hockeytech.com/feed/?feed=modulekit&view=player&key=2976319eb44abe94&fmt=json&client_code=ohl&lang=en&player_id=",i,"&category=profile", sep = "")
+  page <- GET(url)
+  dat <- jsonlite::fromJSON(content(page, as = "text"), flatten = TRUE)  
+  
+  test <- try(data.frame(dat$SiteKit$Player) %>% 
+    select(first_name, last_name, rookie, position, height, weight, birthdate, shoots, most_recent_team_name), silent = TRUE)
+      
+  x <- if(class(test) %in% 'try-error') {next} else {test}
+  
+  players <- rbind(players,x)  
+  i = i + 1
+}
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+players_clean <- players %>% 
+  unique() %>% 
+  mutate(Player = paste0(first_name," ",last_name),
+         most_recent_team_name = gsub("IceDogs","Ice Dogs",most_recent_team_name),
+         most_recent_team_name = gsub("Soo Greyhounds","Sault Ste. Marie Greyhounds",most_recent_team_name),
+         shots = case_when(Player == 'Ivan Lodnia' ~ 'R',
+                          Player == 'Akil Thomas' ~ 'R',
+                          Player == 'Shane Bulitka' ~ 'L',
+                          Player == 'Philip Tomasino' ~ 'R',
+                          Player == 'Ryan Stepien' ~ 'R',
+                          Player == 'Jake Goldowski' ~ 'R',
+                          Player == 'Tyler Tucker' ~ 'L',
+                          shoots == 'L' ~ 'L',
+                          shoots == 'R' ~ 'R'),
+         age = as.numeric(substr((round(difftime(Sys.Date(),birthdate,units="days")/365,0)-1),1,2)),
+         BirthYear = year(birthdate)
+         ) %>% 
+    filter(age <= 22)
+
+
+```
+
+```{r echo=FALSE, paged.print=TRUE}
+kable(players_clean %>% tail(4) %>% 
+              mutate(`First Name` = first_name, `Last Name` = last_name, Rookie = rookie, 
+                     Position = position, Ht = height, Wt = weight, Age = age, Shot = shoots) %>% 
+              select(`First Name`, `Last Name`, BirthYear, Position, Age, Ht, Wt, Shot, Rookie)       
+      )
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+
+# Dataframe for direct passes
+direct_passes <- df_ohl %>%
+  filter(Event %in% c("Play","Incomplete Play"), Detail.1 %in% c("Direct"))
+
+# Join player demographics into direct passes data
+# Player 1
+df_all <- inner_join(direct_passes, players_clean %>% filter(!position %in% 'G') %>% select(Player, position, shoots, age, BirthYear) %>% unique(), by = c("Player" = "Player"))
+
+# Player 2
+df_all <- inner_join(df_all, players_clean %>% filter(!position %in% 'G') %>% select(Player, position, shoots, age, BirthYear) %>% unique(), by=c("Player.2" = "Player")) 
+
+```
+  
+#### Cleaning  
+  
+We reasoned that direct passes are a better representation of passing skill set as it clearly shows intent to move the puck to a specific player. Goalies are excluded from the data set that is fed into the model.  
+  
+A manual review of a subset of player and team names within the data are reconciled to ensure the joins occur correctly.  
+  
+Variables removed from the scouting data include game_date, Home.Team, Away.Team, Period, Clock, Home.Team.Skaters, Away.Team.Skaters, Home.Team.Goals, Away.Team.Goals, Team, Detail.1, Detail.2, Detail.3, Detail.4, Event, Player, and Player.2. Variables removed from the OHL data include Shot, Date of Birth, Height and Weight. Only completed observations are included in the final data (i.e., player exists in both the scouting and OHL data, along with date of birth and shot). Age is calculated as the difference between the the date of birth listed in the OHL data and the current date of the data. Distance between the player and the opposing team's net is calculated as the position between Player.2 and the center of the opposing team's net.
+  
+The final data provides us with 21,834 direct passes.  
+  
+### Methodology  
+  
+Bayesian Additive Regression Trees (BART) is a sum-of-trees model that we can use to predict the distribution of passing success in the context of a number of inputs. BART has been noted to perform better than similar ensemble and boosting models even in the presence of irrelevant inputs.  
+  
+The inputs of the model are:  
+
+  - Passer coordinates
+  - Receiver coordinates
+  - Distance between passer and receiver in feet
+  - Distance between receiver and the opposing net in feet
+  - Passing team score differential
+  - Passing team man advantage
+  - Passer position
+  - Receiver position
+  - Passer and receiver have the same shot (L/R)
+  
+Below are visuals showing the importance of each input in the model, the expected completion probability by distance between players, and the expected completion probability by the distance between the player taking the pass and the opposing team's net.
+  
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+
+bart_fit1 <- readRDS("data/BART_pass/bart_fit1.RDS")
+bart_fit2 <- readRDS("data/BART_pass/bart_fit2.RDS")
+df_varprob <- as.data.frame(rbind(bart_fit1$varprob, bart_fit2$varprob))
+
+df_varprob <- df_varprob %>% 
+  dplyr::mutate(X.Coordinate = mean(X.Coordinate),
+         Y.Coordinate = mean(Y.Coordinate),
+         X.Coordinate.2 = mean(X.Coordinate.2),
+         X.Coordinate.2 = mean(Y.Coordinate.2),
+         distance_from_net = mean(distance_from_net),
+         Lead = mean(Lead),
+         Man_Adv = mean(Man_Adv),
+         position.x = mean(position.x),
+         position.y = mean(position.y),
+         pass_same_side = mean(pass_same_side)
+         ) %>% 
+  unique() %>% 
+  head(1)
+
+df_varprob <- pivot_longer(df_varprob,names(df_varprob))
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.asp = 0.5, fig.width = 10, fig.align = "center"}
+
+var_imp <- ggplot(df_varprob, aes(x=reorder(name,value), y=value,fill=value))+ 
+      geom_bar(stat="identity", position="dodge")+ coord_flip()+
+      ylab("Variable Importance")+
+      xlab("")+
+      ggtitle("Variable Importance")+
+      guides(fill=F)
+
+var_imp
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.asp = 0.5, fig.width = 10, fig.align = "center"}
+
+dist_players <- trained_pass %>%
+  ggplot(aes(distance, prob_means)) +
+  geom_smooth(method = "loess", se = FALSE, color = "goldenrod") +
+  ylim(0, 1) +
+  labs(title = "Pass completion model",
+       x = "Distance between Player1 and Player2 (ft.)",
+       y = "Predicted completion probability") +
+  theme(legend.title = element_blank())
+
+dist_net <- trained_pass %>% 
+  ggplot(aes(distance_from_net, prob_means)) + 
+  geom_smooth(method = "loess", se = FALSE, color = "goldenrod") + 
+  ylim(0, 1) +
+  labs(title = " ",
+       x = "Distance between Player2 and opp. net (ft)",
+       y = " ") +
+  theme(legend.title = element_blank())
+
+(dist_players | dist_net)
+
+```
+  
+### Results  
+  
+Completion probability over expectation equal to 0% suggests that a player is completing passes we expect them to complete. If a player completes 50% of passes that have a predicted probability of 50%, the player will have a 0% CPOE.  
+  
+##### **1. Who are the best tape-to-tape passers in the OHL?**  
+  
+In 2019, Marco Rossi was the best tape-to-tape passer in the OHL. An actual completion percentage of 93.33% and expected completion percentage of 72.99% suggests that he completes passes regardless of difficulty.  
+  
+*In other words, Marco Rossi completed 20.34% of passes over expectation.*    
+  
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+comp_prob <- trained_pass %>% 
+  mutate(Position = position.x) %>% 
+  group_by(Team, Player, BirthYear, Position) %>% 
+  summarise(npasses = n(), 
+            pass_pct = mean(pass_success_binary),
+            pass_pred = mean(prob_means),
+            cpoe = pass_pct - pass_pred)%>% 
+  filter(npasses >= 20) %>% 
+  arrange(-cpoe)
+
+library(tidyverse)
+library(scales)
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+kable(comp_prob %>% 
+              mutate(Actual = percent(pass_pct), Expected = percent(pass_pred), CPOE = percent(cpoe)) %>% 
+              select(Team, Position, Player, BirthYear, Actual, Expected, CPOE) %>% 
+              arrange(-as.numeric(CPOE)) %>% 
+              head(10)
+      # ,
+            # align =c("l","l","l","l","r", "r", "r", "r")
+            )
+
+```
+
+The visual belows shows CPOE across position and birth year for those with at least 20 direct passes.
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.asp = 0.8, fig.width = 10, fig.align = "center", paged.print=TRUE}
+
+# pos_viz <- ggplot(comp_prob, aes(x=Position, y=cpoe)) + 
+#   geom_point(aes(colour = Position), size = 2) +
+#   labs(title = "CPOE by Position", x = "Position", y = "CPOE") +
+#   theme(legend.position = "none") +
+#   scale_color_manual(values=wes_palette(n=4, name="Moonrise2"))
+
+pos_age_viz <- ggplot(comp_prob, aes(x=BirthYear, y=cpoe)) + 
+  geom_point(aes(colour = Position), size = 2) +
+  labs(title = "CPOE by Age", x = "Birth Year", y = "") +
+  scale_color_manual(values=wes_palette(n=4, name="Moonrise2"))
+  # geom_text(data = comp_prob, aes(label=ifelse(cpoe>=0.2,as.character(Player),'')),hjust=0,vjust=0) + 
+
+
+pos_age_viz
+
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+comp_var <- trained_pass %>%
+  mutate(Position = position.x, prob_int = cut(prob_means*100, breaks = seq(5,100, by= 5), labels =c("<5","5-10","10-15","15-20","20-25","25-30","30-35","35-40","40-45","45-50","50-55","55-60","60-65","65-70","70-75","75-80","85-90", "90-95",">95"))) %>% 
+  group_by(Team, Player, BirthYear, Position, prob_int) %>%
+  summarise(npasses = n(), 
+            pass_pct = mean(pass_success_binary),
+            pass_pred = mean(prob_means),
+            cpoe = pass_pct - pass_pred)%>% 
+  filter(npasses >= 5) %>%
+  arrange(prob_int, -cpoe)
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+draft_eligible <- players_clean %>% filter(BirthYear == 2003 | age <= 17) %>% select(Player)
+de_comp_prob <- comp_prob %>% filter(Player %in% draft_eligible$Player)
+de_comp_var <- comp_var %>% filter(Player %in% draft_eligible$Player)
+view(de_comp_var)
+```
+
+  
+##### **2. Who are the best 2021 draft eligible tape-to-tape passers?**  
+  
+Brandt Clarke is the best 2021 draft eligible passer in the OHL. The [NHL](https://www.nhl.com/news/2021-nhl-draft-top-32-prospects/c-320544528) has Clarke listed as the 3rd best prospect in the 2021 draft.  
+    
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+
+kable(de_comp_prob %>% 
+              mutate(Actual = percent(pass_pct), Expected = percent(pass_pred), CPOE = percent(cpoe)) %>% 
+              select(Team, Position, Player, BirthYear, Actual, Expected, CPOE) %>% 
+              arrange(-as.numeric(CPOE)) %>% 
+              head(10)
+            )
+```
+  
+###### _We are defining draft eligible as players born in 2003 that have at least 20 direct passes in the scouting data._
+  
+One players not listed in the top CPOE scores is center Connor Lockhart, who [Lines.com](https://www.lines.com/nhl/drafts) ranks 63rd best prospects in the upcoming draft.  
+  
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+kable(de_comp_prob %>% 
+              filter(Player == 'Connor Lockhart') %>% 
+              mutate(Actual = percent(pass_pct), Expected = percent(pass_pred), CPOE = percent(cpoe)) %>% 
+              select(Team, Position, Player, BirthYear, Actual, Expected, CPOE) %>% 
+              arrange(-as.numeric(CPOE)) %>% 
+              head(10)
+            )
+
+```
+  
+Partioning the data by probability intervals (e.g., 0-5%, 5-10%,...,90-95%, 95-100% completion probability) might help us better understand performance.  
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE, fig.asp = 0.8, fig.width = 10, fig.align = "center"}
+interval_viz <- ggplot(de_comp_var %>% filter(Player == 'Connor Lockhart'), aes(x=prob_int, y=cpoe))+
+  geom_point(aes(colour = Player), size = 2) +
+  labs(title = "CPOE by Probability Intervals", x = "Probability Interval", y = "CPOE")
+
+interval_viz + scale_color_manual(values=wes_palette(n=4, name="Moonrise2")) + theme_grey(base_size = 9)
+
+```
+  
+###### _Probability interval CPOE requires at least 5 passes to occur within the respective interval._    
+  
+Connor performs exceptionally well in the challenging situations. His 34.30% CPOE in the 15-20% interval and 32.34% CPOE in the 20-25% CPOE interval are the highest CPOE scores among draft eligible players. In fact, his CPOE in these probability intervals are the highest CPOEs of any interval in the entire league. However, he struggles to complete passes that we'd expect him to complete >95% of the time. In practice, a video coach can apply CPOE to measure improvement over time.   
+
+
+
+### Application  
+   
+CPOE provides decision makers with the ability to quantify passing ability. Coaches will be able to quickly highlight opportunities for player improvement, and how they may want to utilize specific players in set plays.   
+  
+Modeling several years of data can help us further our understanding of player development as it relates to passing. More specifically, historical modeling can help NHL decision makers identify how CPOE in major junior translates into NHL. If historical data suggests CPOE in major junior is an indicator of CPOE in the NHL, GMs will be able to optimize draft capital.  
+  
+Lastly, BART can be applied to NHL player tracking data, allowing us to better understanding passing in the NHL.    
+  
+[Github](https://github.com/mwasmith/bigdatacup)  
+[Twitter](https://twitter.com/MatchewMatchew)
