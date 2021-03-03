@@ -1,4 +1,4 @@
-# This script is similar to Asmae Toumi's big data bowl BART model linked in the RMD file.
+# Inspiration from Asmae Toumi's Big Data Bowl submission.
 
 library(skimr)
 library(BART)
